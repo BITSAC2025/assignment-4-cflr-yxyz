@@ -19,11 +19,11 @@ int main(int argc, char **argv)
 
     SVFIRBuilder builder;
     auto pag = builder.build();
-    pag->dump();
+    pag->dump("pag.dot");
 
     CFLR solver;
     solver.buildGraph(pag);
-    // 完成此方法
+    // TODO: complete this method
     solver.solve();
     solver.dumpResult();
 
@@ -34,27 +34,16 @@ int main(int argc, char **argv)
 
 void CFLR::solve()
 {
-    // 用图中的所有现有边初始化工作表
-    for (auto &srcItr : graph->getSuccessorMap())
-    {
-        unsigned src = srcItr.first;
-        for (auto &lblItr : srcItr.second)
-        {
-            EdgeLabel label = lblItr.first;
-            for (auto dst : lblItr.second)
-            {
-                workList.push(CFLREdge(src, dst, label));
-            }
-        }
-    }
-
-    // 为 VF 和 VA 添加自环边（ε 产生式：VF ::= ε, VA ::= ε）
-    // 首先需要获取所有节点
+    // Initialize VF and VA as reflexive (VF ∷= ε, VA ∷= ε)
+    // Collect all nodes first
     std::set<unsigned> allNodes;
-    for (auto &srcItr : graph->getSuccessorMap())
+    auto &succMap = graph->getSuccessorMap();
+    auto &predMap = graph->getPredecessorMap();
+    
+    for (auto &nodeItr : succMap)
     {
-        allNodes.insert(srcItr.first);
-        for (auto &lblItr : srcItr.second)
+        allNodes.insert(nodeItr.first);
+        for (auto &lblItr : nodeItr.second)
         {
             for (auto dst : lblItr.second)
             {
@@ -62,9 +51,20 @@ void CFLR::solve()
             }
         }
     }
+    for (auto &nodeItr : predMap)
+    {
+        allNodes.insert(nodeItr.first);
+        for (auto &lblItr : nodeItr.second)
+        {
+            for (auto src : lblItr.second)
+            {
+                allNodes.insert(src);
+            }
+        }
+    }
     
-    // 添加 VF 和 VA 自环边
-    for (unsigned node : allNodes)
+    // Add reflexive edges for VF and VA
+    for (auto node : allNodes)
     {
         if (!graph->hasEdge(node, node, VF))
         {
@@ -77,467 +77,298 @@ void CFLR::solve()
             workList.push(CFLREdge(node, node, VA));
         }
     }
+    
+    // Initialize worklist with all existing edges (Addr, Copy, Store, Load)
+    for (auto &nodeItr : succMap)
+    {
+        unsigned src = nodeItr.first;
+        for (auto &lblItr : nodeItr.second)
+        {
+            EdgeLabel label = lblItr.first;
+            // Add initial edges (Addr, Copy, Store, Load) to worklist
+            if (label == Addr || label == Copy || label == Store || label == Load)
+            {
+                for (auto dst : lblItr.second)
+                {
+                    workList.push(CFLREdge(src, dst, label));
+                }
+            }
+        }
+    }
 
-    // 主要的 CFL-Reachability 算法
+    // Main algorithm: process worklist until empty
     while (!workList.empty())
     {
         CFLREdge edge = workList.pop();
-        unsigned src = edge.src;
-        unsigned dst = edge.dst;
+        unsigned u = edge.src;
+        unsigned v = edge.dst;
         EdgeLabel label = edge.label;
 
-        // 根据标签应用语法规则
+        // Helper function to add edge if not exists
+        auto addNewEdge = [this](unsigned src, unsigned dst, EdgeLabel lbl) {
+            if (!graph->hasEdge(src, dst, lbl))
+            {
+                graph->addEdge(src, dst, lbl);
+                workList.push(CFLREdge(src, dst, lbl));
+            }
+        };
+
+        auto &predMap = graph->getPredecessorMap();
+
+        // Apply grammar rules based on the current edge label
         switch (label)
         {
-            case Addr:
-            {
-                // PT ::= Addr VF
-                // 如果有 Addr: src -> dst，检查是否存在 VF: dst -> x，然后添加 PT: src -> x
-                for (auto &vfItr : graph->getSuccessorMap()[dst])
-                {
-                    if (vfItr.first == VF)
-                    {
-                        for (auto x : vfItr.second)
-                        {
-                            if (!graph->hasEdge(src, x, PT))
-                            {
-                                graph->addEdge(src, x, PT);
-                                workList.push(CFLREdge(src, x, PT));
-                            }
-                        }
-                    }
-                }
-                
-                // PT ::= VF Addr
-                // 如果有 VF: x -> src，并且 Addr: src -> dst，那么添加 PT: x -> dst
-                for (auto &vfItr : graph->getPredecessorMap()[src])
-                {
-                    if (vfItr.first == VF)
-                    {
-                        for (auto x : vfItr.second)
-                        {
-                            if (!graph->hasEdge(x, dst, PT))
-                            {
-                                graph->addEdge(x, dst, PT);
-                                workList.push(CFLREdge(x, dst, PT));
-                            }
-                        }
-                    }
-                }
-                break;
-            }
-            
-            case Copy:
-            {
-                // VF ::= Copy
-                // 如果有 Copy: src -> dst，添加 VF: src -> dst
-                if (!graph->hasEdge(src, dst, VF))
-                {
-                    graph->addEdge(src, dst, VF);
-                    workList.push(CFLREdge(src, dst, VF));
-                }
-                break;
-            }
-            
-            case Store:
-            {
-                // SV ::= Store VA
-                // 如果有 Store: src -> dst，检查是否存在 VA: dst -> x，然后添加 SV: src -> x
-                for (auto &vaItr : graph->getSuccessorMap()[dst])
-                {
-                    if (vaItr.first == VA)
-                    {
-                        for (auto x : vaItr.second)
-                        {
-                            if (!graph->hasEdge(src, x, SV))
-                            {
-                                graph->addEdge(src, x, SV);
-                                workList.push(CFLREdge(src, x, SV));
-                            }
-                        }
-                    }
-                }
-                
-                // SV ::= VA Store
-                // 如果有 VA: x -> src，并且 Store: src -> dst，那么添加 SV: x -> dst
-                for (auto &vaItr : graph->getPredecessorMap()[src])
-                {
-                    if (vaItr.first == VA)
-                    {
-                        for (auto x : vaItr.second)
-                        {
-                            if (!graph->hasEdge(x, dst, SV))
-                            {
-                                graph->addEdge(x, dst, SV);
-                                workList.push(CFLREdge(x, dst, SV));
-                            }
-                        }
-                    }
-                }
-                
-                // VF ::= Store VP
-                // 如果有 Store: src -> dst，检查是否存在 VP: dst -> x，然后添加 VF: src -> x
-                for (auto &vpItr : graph->getSuccessorMap()[dst])
-                {
-                    if (vpItr.first == VP)
-                    {
-                        for (auto x : vpItr.second)
-                        {
-                            if (!graph->hasEdge(src, x, VF))
-                            {
-                                graph->addEdge(src, x, VF);
-                                workList.push(CFLREdge(src, x, VF));
-                            }
-                        }
-                    }
-                }
-                
-                // VF ::= PV Store
-                // 如果有 PV: x -> src，并且 Store: src -> dst，那么添加 VF: x -> dst
-                for (auto &pvItr : graph->getPredecessorMap()[src])
-                {
-                    if (pvItr.first == PV)
-                    {
-                        for (auto x : pvItr.second)
-                        {
-                            if (!graph->hasEdge(x, dst, VF))
-                            {
-                                graph->addEdge(x, dst, VF);
-                                workList.push(CFLREdge(x, dst, VF));
-                            }
-                        }
-                    }
-                }
-                break;
-            }
-            
-            case Load:
-            {
-                // LV ::= Load VA
-                // 如果有 Load: src -> dst，检查是否存在 VA: dst -> x，然后添加 LV: src -> x
-                for (auto &vaItr : graph->getSuccessorMap()[dst])
-                {
-                    if (vaItr.first == VA)
-                    {
-                        for (auto x : vaItr.second)
-                        {
-                            if (!graph->hasEdge(src, x, LV))
-                            {
-                                graph->addEdge(src, x, LV);
-                                workList.push(CFLREdge(src, x, LV));
-                            }
-                        }
-                    }
-                }
-                
-                // VA ::= LV Load
-                // 如果有 LV: x -> src，并且 Load: src -> dst，那么添加 VA: x -> dst
-                for (auto &lvItr : graph->getPredecessorMap()[src])
-                {
-                    if (lvItr.first == LV)
-                    {
-                        for (auto x : lvItr.second)
-                        {
-                            if (!graph->hasEdge(x, dst, VA))
-                            {
-                                graph->addEdge(x, dst, VA);
-                                workList.push(CFLREdge(x, dst, VA));
-                            }
-                        }
-                    }
-                }
-                
-                // VF ::= SV Load
-                // 如果有 SV: x -> src，并且 Load: src -> dst，那么添加 VF: x -> dst
-                for (auto &svItr : graph->getPredecessorMap()[src])
-                {
-                    if (svItr.first == SV)
-                    {
-                        for (auto x : svItr.second)
-                        {
-                            if (!graph->hasEdge(x, dst, VF))
-                            {
-                                graph->addEdge(x, dst, VF);
-                                workList.push(CFLREdge(x, dst, VF));
-                            }
-                        }
-                    }
-                }
-                
-                // VF ::= PV Load
-                // 如果有 PV: x -> src，并且 Load: src -> dst，那么添加 VF: x -> dst
-                for (auto &pvItr : graph->getPredecessorMap()[src])
-                {
-                    if (pvItr.first == PV)
-                    {
-                        for (auto x : pvItr.second)
-                        {
-                            if (!graph->hasEdge(x, dst, VF))
-                            {
-                                graph->addEdge(x, dst, VF);
-                                workList.push(CFLREdge(x, dst, VF));
-                            }
-                        }
-                    }
-                }
-                
-                // VF ::= Load SV
-                // 如果有 Load: src -> dst，检查是否存在 SV: dst -> x，然后添加 VF: src -> x
-                for (auto &svItr : graph->getSuccessorMap()[dst])
-                {
-                    if (svItr.first == SV)
-                    {
-                        for (auto x : svItr.second)
-                        {
-                            if (!graph->hasEdge(src, x, VF))
-                            {
-                                graph->addEdge(src, x, VF);
-                                workList.push(CFLREdge(src, x, VF));
-                            }
-                        }
-                    }
-                }
-                
-                // VF ::= Load VP
-                // 如果有 Load: src -> dst，检查是否存在 VP: dst -> x，然后添加 VF: src -> x
-                for (auto &vpItr : graph->getSuccessorMap()[dst])
-                {
-                    if (vpItr.first == VP)
-                    {
-                        for (auto x : vpItr.second)
-                        {
-                            if (!graph->hasEdge(src, x, VF))
-                            {
-                                graph->addEdge(src, x, VF);
-                                workList.push(CFLREdge(src, x, VF));
-                            }
-                        }
-                    }
-                }
-                break;
-            }
-            
+            // Rule: PT ∷= VF Addr
             case VF:
             {
-                // VF ::= VF VF
-                // 如果有 VF: src -> dst，检查是否存在 VF: dst -> x，然后添加 VF: src -> x
-                for (auto &vfItr : graph->getSuccessorMap()[dst])
+                // VF is reflexive (already initialized)
+                // Rule: PT ∷= VF Addr (if u --VF--> v and v --Addr--> w, then u --PT--> w)
+                if (succMap.find(v) != succMap.end() && succMap[v].find(Addr) != succMap[v].end())
                 {
-                    if (vfItr.first == VF)
+                    for (auto w : succMap[v][Addr])
                     {
-                        for (auto x : vfItr.second)
-                        {
-                            if (!graph->hasEdge(src, x, VF))
-                            {
-                                graph->addEdge(src, x, VF);
-                                workList.push(CFLREdge(src, x, VF));
-                            }
-                        }
+                        addNewEdge(u, w, PT);
                     }
                 }
-                
-                // VF ::= VF VF (左侧)
-                // 如果有 VF: x -> src，并且 VF: src -> dst，那么添加 VF: x -> dst
-                for (auto &vfItr : graph->getPredecessorMap()[src])
+                // Rule: PT ∷= Addr VF (reverse: if prev --Addr--> u and u --VF--> v, then prev --PT--> v)
+                if (predMap.find(u) != predMap.end() && predMap[u].find(Addr) != predMap[u].end())
                 {
-                    if (vfItr.first == VF)
+                    for (auto prev : predMap[u][Addr])
                     {
-                        for (auto x : vfItr.second)
-                        {
-                            if (!graph->hasEdge(x, dst, VF))
-                            {
-                                graph->addEdge(x, dst, VF);
-                                workList.push(CFLREdge(x, dst, VF));
-                            }
-                        }
+                        addNewEdge(prev, v, PT);
+                    }
+                }
+                // Rule: VF ∷= VF VF (if u --VF--> v and v --VF--> w, then u --VF--> w)
+                if (succMap.find(v) != succMap.end() && succMap[v].find(VF) != succMap[v].end())
+                {
+                    for (auto w : succMap[v][VF])
+                    {
+                        addNewEdge(u, w, VF);
+                    }
+                }
+                // Rule: VA ∷= VF VA (if u --VF--> v and v --VA--> w, then u --VA--> w)
+                if (succMap.find(v) != succMap.end() && succMap[v].find(VA) != succMap[v].end())
+                {
+                    for (auto w : succMap[v][VA])
+                    {
+                        addNewEdge(u, w, VA);
+                    }
+                }
+                // Rule: VA ∷= VA VF (if prev --VA--> u and u --VF--> v, then prev --VA--> v)
+                if (predMap.find(u) != predMap.end() && predMap[u].find(VA) != predMap[u].end())
+                {
+                    for (auto prev : predMap[u][VA])
+                    {
+                        addNewEdge(prev, v, VA);
                     }
                 }
                 break;
             }
-            
-            case VA:
+
+            // Rule: PT ∷= Addr VF
+            case Addr:
             {
-                // VA ::= VF VA
-                // 如果有 VF: src -> dst，检查是否存在 VA: dst -> x，然后添加 VA: src -> x
-                for (auto &vaItr : graph->getSuccessorMap()[dst])
+                // Rule: PT ∷= Addr VF (if u --Addr--> v and v --VF--> w, then u --PT--> w)
+                if (succMap.find(v) != succMap.end() && succMap[v].find(VF) != succMap[v].end())
                 {
-                    if (vaItr.first == VA)
+                    for (auto w : succMap[v][VF])
                     {
-                        for (auto x : vaItr.second)
-                        {
-                            if (!graph->hasEdge(src, x, VA))
-                            {
-                                graph->addEdge(src, x, VA);
-                                workList.push(CFLREdge(src, x, VA));
-                            }
-                        }
+                        addNewEdge(u, w, PT);
                     }
                 }
-                
-                // VA ::= VA VF
-                // 如果有 VA: x -> src，并且 VF: src -> dst，那么添加 VA: x -> dst
-                for (auto &vaItr : graph->getPredecessorMap()[src])
+                // Rule: PT ∷= VF Addr (reverse: if prev --VF--> u and u --Addr--> v, then prev --PT--> v)
+                if (predMap.find(u) != predMap.end() && predMap[u].find(VF) != predMap[u].end())
                 {
-                    if (vaItr.first == VA)
+                    for (auto prev : predMap[u][VF])
                     {
-                        for (auto x : vaItr.second)
-                        {
-                            if (!graph->hasEdge(x, dst, VA))
-                            {
-                                graph->addEdge(x, dst, VA);
-                                workList.push(CFLREdge(x, dst, VA));
-                            }
-                        }
+                        addNewEdge(prev, v, PT);
                     }
                 }
                 break;
             }
-            
+
+            // Rule: VF ∷= Copy
+            case Copy:
+            {
+                // Copy directly becomes VF
+                addNewEdge(u, v, VF);
+                break;
+            }
+
+            // Rule: SV ∷= Store VA, then VF ∷= SV Load
+            case Store:
+            {
+                // Rule: SV ∷= Store VA (if u --Store--> v and v --VA--> w, then u --SV--> w)
+                if (succMap.find(v) != succMap.end() && succMap[v].find(VA) != succMap[v].end())
+                {
+                    for (auto w : succMap[v][VA])
+                    {
+                        addNewEdge(u, w, SV);
+                    }
+                }
+                // Rule: SV ∷= VA Store (if prev --VA--> u and u --Store--> v, then prev --SV--> v)
+                if (predMap.find(u) != predMap.end() && predMap[u].find(VA) != predMap[u].end())
+                {
+                    for (auto prev : predMap[u][VA])
+                    {
+                        addNewEdge(prev, v, SV);
+                    }
+                }
+                // Rule: VF ∷= Store VP (if u --Store--> v and v --VP--> w, then u --VF--> w)
+                if (succMap.find(v) != succMap.end() && succMap[v].find(VP) != succMap[v].end())
+                {
+                    for (auto w : succMap[v][VP])
+                    {
+                        addNewEdge(u, w, VF);
+                    }
+                }
+                break;
+            }
+
+            // Rule: LV ∷= Load VA, then VA ∷= LV Load, and VF ∷= SV Load, VF ∷= PV Load
+            case Load:
+            {
+                // Rule: LV ∷= Load VA (if there's VA from v, create LV from u)
+                if (succMap.find(v) != succMap.end() && succMap[v].find(VA) != succMap[v].end())
+                {
+                    for (auto w : succMap[v][VA])
+                    {
+                        addNewEdge(u, w, LV);
+                    }
+                }
+                // Rule: VA ∷= LV Load (if there's LV to u, create VA from prev to v)
+                if (predMap.find(u) != predMap.end() && predMap[u].find(LV) != predMap[u].end())
+                {
+                    for (auto prev : predMap[u][LV])
+                    {
+                        addNewEdge(prev, v, VA);
+                    }
+                }
+                // Rule: VF ∷= SV Load (if there's SV to u, create VF from prev to v)
+                if (predMap.find(u) != predMap.end() && predMap[u].find(SV) != predMap[u].end())
+                {
+                    for (auto prev : predMap[u][SV])
+                    {
+                        addNewEdge(prev, v, VF);
+                    }
+                }
+                // Rule: VF ∷= PV Load (if there's PV to u, create VF from prev to v)
+                if (predMap.find(u) != predMap.end() && predMap[u].find(PV) != predMap[u].end())
+                {
+                    for (auto prev : predMap[u][PV])
+                    {
+                        addNewEdge(prev, v, VF);
+                    }
+                }
+                break;
+            }
+
+            // Rule: SV ∷= Store VA
             case SV:
             {
-                // VF ::= SV Load
-                // 如果有 SV: src -> dst，检查是否存在 Load: dst -> x，然后添加 VF: src -> x
-                for (auto &loadItr : graph->getSuccessorMap()[dst])
+                // Rule: VF ∷= SV Load (if there's Load from v, create VF from u)
+                if (succMap.find(v) != succMap.end() && succMap[v].find(Load) != succMap[v].end())
                 {
-                    if (loadItr.first == Load)
+                    for (auto w : succMap[v][Load])
                     {
-                        for (auto x : loadItr.second)
-                        {
-                            if (!graph->hasEdge(src, x, VF))
-                            {
-                                graph->addEdge(src, x, VF);
-                                workList.push(CFLREdge(src, x, VF));
-                            }
-                        }
+                        addNewEdge(u, w, VF);
                     }
                 }
                 break;
             }
-            
+
+            // Rule: PV ∷= PT VA
             case PV:
             {
-                // PV ::= PT VA
-                // 如果有 PT: src -> dst，检查是否存在 VA: dst -> x，然后添加 PV: src -> x
-                for (auto &vaItr : graph->getSuccessorMap()[dst])
+                // Rule: VF ∷= PV Load (if there's Load from v, create VF from u)
+                if (succMap.find(v) != succMap.end() && succMap[v].find(Load) != succMap[v].end())
                 {
-                    if (vaItr.first == VA)
+                    for (auto w : succMap[v][Load])
                     {
-                        for (auto x : vaItr.second)
-                        {
-                            if (!graph->hasEdge(src, x, PV))
-                            {
-                                graph->addEdge(src, x, PV);
-                                workList.push(CFLREdge(src, x, PV));
-                            }
-                        }
-                    }
-                }
-                
-                // VF ::= PV Load
-                // 如果有 PV: src -> dst，检查是否存在 Load: dst -> x，然后添加 VF: src -> x
-                for (auto &loadItr : graph->getSuccessorMap()[dst])
-                {
-                    if (loadItr.first == Load)
-                    {
-                        for (auto x : loadItr.second)
-                        {
-                            if (!graph->hasEdge(src, x, VF))
-                            {
-                                graph->addEdge(src, x, VF);
-                                workList.push(CFLREdge(src, x, VF));
-                            }
-                        }
+                        addNewEdge(u, w, VF);
                     }
                 }
                 break;
             }
-            
+
+            // Rule: VP ∷= VA PT
             case VP:
             {
-                // VP ::= VA PT
-                // 如果有 VA: x -> src，并且 PT: src -> dst，那么添加 VP: x -> dst
-                for (auto &vaItr : graph->getPredecessorMap()[src])
+                // Rule: VF ∷= Store VP (if there's Store to u, create VF from prev to v)
+                if (predMap.find(u) != predMap.end() && predMap[u].find(Store) != predMap[u].end())
                 {
-                    if (vaItr.first == VA)
+                    for (auto prev : predMap[u][Store])
                     {
-                        for (auto x : vaItr.second)
-                        {
-                            if (!graph->hasEdge(x, dst, VP))
-                            {
-                                graph->addEdge(x, dst, VP);
-                                workList.push(CFLREdge(x, dst, VP));
-                            }
-                        }
-                    }
-                }
-                
-                // VF ::= Store VP
-                // 如果有 Store: x -> src，并且 VP: src -> dst，那么添加 VF: x -> dst
-                for (auto &storeItr : graph->getPredecessorMap()[src])
-                {
-                    if (storeItr.first == Store)
-                    {
-                        for (auto x : storeItr.second)
-                        {
-                            if (!graph->hasEdge(x, dst, VF))
-                            {
-                                graph->addEdge(x, dst, VF);
-                                workList.push(CFLREdge(x, dst, VF));
-                            }
-                        }
+                        addNewEdge(prev, v, VF);
                     }
                 }
                 break;
             }
-            
+
+            // Rule: VA ∷= LV Load
             case LV:
             {
-                // LV 可用于 VA ::= LV Load
-                // 此情况处理当 LV 边被添加时
+                // Rule: VA ∷= LV Load (if there's Load from v, create VA from u)
+                if (succMap.find(v) != succMap.end() && succMap[v].find(Load) != succMap[v].end())
+                {
+                    for (auto w : succMap[v][Load])
+                    {
+                        addNewEdge(u, w, VA);
+                    }
+                }
                 break;
             }
-            
+
+            // Rule: VA ∷= ε (reflexive)
+            case VA:
+            {
+                // VA is reflexive (already initialized)
+                // Rule: VA ∷= VF VA (already handled in VF case)
+                // Rule: VA ∷= VA VF (already handled in VF case)
+                // Rule: SV ∷= Store VA (already handled in Store case)
+                // Rule: SV ∷= VA Store (already handled in Store case)
+                // Rule: PV ∷= PT VA
+                if (predMap.find(u) != predMap.end() && predMap[u].find(PT) != predMap[u].end())
+                {
+                    for (auto prev : predMap[u][PT])
+                    {
+                        addNewEdge(prev, v, PV);
+                    }
+                }
+                // Rule: VP ∷= VA PT
+                if (succMap.find(v) != succMap.end() && succMap[v].find(PT) != succMap[v].end())
+                {
+                    for (auto w : succMap[v][PT])
+                    {
+                        addNewEdge(u, w, VP);
+                    }
+                }
+                // Rule: LV ∷= Load VA (already handled in Load case)
+                break;
+            }
+
+            // Rule: PT ∷= VF Addr, PT ∷= Addr VF
             case PT:
             {
-                // PT ::= VF Addr (在 Addr 情况中处理)
-                // PT ::= Addr VF (在 Addr 情况中处理)
-                // PT 可用于 PV ::= PT VA 和 VP ::= VA PT
-                // PV ::= PT VA
-                // 如果有 PT: src -> dst，检查是否存在 VA: dst -> x，然后添加 PV: src -> x
-                for (auto &vaItr : graph->getSuccessorMap()[dst])
+                // Rule: PV ∷= PT VA (if there's VA from v, create PV from u)
+                if (succMap.find(v) != succMap.end() && succMap[v].find(VA) != succMap[v].end())
                 {
-                    if (vaItr.first == VA)
+                    for (auto w : succMap[v][VA])
                     {
-                        for (auto x : vaItr.second)
-                        {
-                            if (!graph->hasEdge(src, x, PV))
-                            {
-                                graph->addEdge(src, x, PV);
-                                workList.push(CFLREdge(src, x, PV));
-                            }
-                        }
+                        addNewEdge(u, w, PV);
                     }
                 }
-                
-                // VP ::= VA PT
-                // 如果有 VA: x -> src，并且 PT: src -> dst，那么添加 VP: x -> dst
-                for (auto &vaItr : graph->getPredecessorMap()[src])
+                // Rule: VP ∷= VA PT (if there's VA to u, create VP from prev to v)
+                if (predMap.find(u) != predMap.end() && predMap[u].find(VA) != predMap[u].end())
                 {
-                    if (vaItr.first == VA)
+                    for (auto prev : predMap[u][VA])
                     {
-                        for (auto x : vaItr.second)
-                        {
-                            if (!graph->hasEdge(x, dst, VP))
-                            {
-                                graph->addEdge(x, dst, VP);
-                                workList.push(CFLREdge(x, dst, VP));
-                            }
-                        }
+                        addNewEdge(prev, v, VP);
                     }
                 }
                 break;
             }
-            
+
             default:
                 break;
         }
