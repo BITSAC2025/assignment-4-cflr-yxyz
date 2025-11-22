@@ -108,6 +108,8 @@ void CFLR::solve()
         {
             case VFBar:
                 applyForwardRule(src, dst, VFBar, AddrBar, PT);
+                // VFBar的传递闭包：VFBar ∷= VFBar VFBar
+                applyForwardRule(src, dst, VFBar, VFBar, VFBar);
                 applyBackwardRule(src, dst, VFBar, VFBar, VFBar);
                 applyForwardRule(src, dst, VFBar, VA, VA);
                 break;
