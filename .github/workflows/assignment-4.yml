@@ -46,25 +46,25 @@ jobs:
       
       - name: Print
         run: |
-          # 定义标准答案目录路径
+          
           ANSWER_SOURCE_DIR="answer-repo/Assignment-4-CFLR/answers"
           echo "=============================================="
           echo "          Reference Answer Files Content       "
           echo "=============================================="
           
-          # 检查标准答案目录是否存在
+         
           if [ ! -d "$ANSWER_SOURCE_DIR" ]; then
             echo "Error: Reference answer directory not found at $ANSWER_SOURCE_DIR"
             exit 1
           fi
           
-          # 检查目录是否为空
+          
           if [ -z "$(ls -A "$ANSWER_SOURCE_DIR")" ]; then
             echo "Warning: Reference answer directory is empty at $ANSWER_SOURCE_DIR"
             return
           fi
           
-          # 遍历并打印每个标准答案文件的内容
+         
           for answer_file in "$ANSWER_SOURCE_DIR"/*; do
             if [ -f "$answer_file" ]; then
               filename=$(basename "$answer_file")
