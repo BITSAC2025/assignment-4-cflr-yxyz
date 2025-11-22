@@ -19,12 +19,13 @@ int main(int argc, char **argv)
 
     SVFIRBuilder builder;
     auto pag = builder.build();
+    
     std::string pagDotFile = pag->getModuleIdentifier() + ".dot";
     pag->dump(pagDotFile);
 
     CFLR solver;
     solver.buildGraph(pag);
-    // TODO: complete this method
+    // TODO: 完成此方法
     solver.solve();
     solver.dumpResult();
 
@@ -35,345 +36,165 @@ int main(int argc, char **argv)
 
 void CFLR::solve()
 {
-    if (!graph)
-        return;
-    
-    // Initialize VF and VA as reflexive (VF ∷= ε, VA ∷= ε)
-    // Collect all nodes first
-    std::set<unsigned> allNodes;
-    auto &succMap = graph->getSuccessorMap();
-    auto &predMap = graph->getPredecessorMap();
-    
-    for (auto &nodeItr : succMap)
+    // 收集所有节点并用现有边初始化工作列表
+    std::unordered_set<unsigned> nodeSet;
+
+    for (auto &nodeItr : graph->getSuccessorMap())
     {
-        allNodes.insert(nodeItr.first);
+        unsigned sourceNode = nodeItr.first;
+        nodeSet.insert(sourceNode);
+
         for (auto &lblItr : nodeItr.second)
         {
-            for (auto dst : lblItr.second)
+            EdgeLabel edgeType = lblItr.first;
+            for (auto targetNode : lblItr.second)
             {
-                allNodes.insert(dst);
-            }
-        }
-    }
-    for (auto &nodeItr : predMap)
-    {
-        allNodes.insert(nodeItr.first);
-        for (auto &lblItr : nodeItr.second)
-        {
-            for (auto src : lblItr.second)
-            {
-                allNodes.insert(src);
-            }
-        }
-    }
-    
-    // Add reflexive edges for VF and VA
-    for (auto node : allNodes)
-    {
-        if (!graph->hasEdge(node, node, VF))
-        {
-            graph->addEdge(node, node, VF);
-            workList.push(CFLREdge(node, node, VF));
-        }
-        if (!graph->hasEdge(node, node, VA))
-        {
-            graph->addEdge(node, node, VA);
-            workList.push(CFLREdge(node, node, VA));
-        }
-    }
-    
-    // Initialize worklist with all existing edges (Addr, Copy, Store, Load)
-    for (auto &nodeItr : succMap)
-    {
-        unsigned src = nodeItr.first;
-        for (auto &lblItr : nodeItr.second)
-        {
-            EdgeLabel label = lblItr.first;
-            // Add initial edges (Addr, Copy, Store, Load) to worklist
-            if (label == Addr || label == Copy || label == Store || label == Load)
-            {
-                for (auto dst : lblItr.second)
-                {
-                    workList.push(CFLREdge(src, dst, label));
-                }
+                nodeSet.insert(targetNode);
+                workList.push(CFLREdge(sourceNode, targetNode, edgeType));
             }
         }
     }
 
-    // Main algorithm: process worklist until empty
+    // 辅助lambda函数：如果边不存在则添加新边
+    auto insertNewEdge = [this](unsigned from, unsigned to, EdgeLabel lbl) {
+        if (!graph->hasEdge(from, to, lbl))
+        {
+            graph->addEdge(from, to, lbl);
+            workList.push(CFLREdge(from, to, lbl));
+        }
+    };
+
+    // 初始化VF、VFBar和VA的自反边
+    for (auto nodeId : nodeSet)
+    {
+        insertNewEdge(nodeId, nodeId, VF);
+        insertNewEdge(nodeId, nodeId, VFBar);
+        insertNewEdge(nodeId, nodeId, VA);
+    }
+
+    // 辅助函数：应用前向规则 A -> B C（如果src->dst有标签A且dst->next有标签B，则添加src->next标签C）
+    auto applyForwardRule = [&](unsigned src, unsigned dst, EdgeLabel srcLabel, EdgeLabel followLabel, EdgeLabel resultLabel) {
+        auto &succMap = graph->getSuccessorMap();
+        if (succMap.count(dst) && succMap[dst].count(followLabel))
+        {
+            for (auto nextNode : succMap[dst][followLabel])
+                insertNewEdge(src, nextNode, resultLabel);
+        }
+    };
+
+    // 辅助函数：应用后向规则 A -> B C（如果prev->src有标签B且src->dst有标签A，则添加prev->dst标签C）
+    auto applyBackwardRule = [&](unsigned src, unsigned dst, EdgeLabel srcLabel, EdgeLabel prevLabel, EdgeLabel resultLabel) {
+        auto &predMap = graph->getPredecessorMap();
+        if (predMap.count(src) && predMap[src].count(prevLabel))
+        {
+            for (auto prevNode : predMap[src][prevLabel])
+                insertNewEdge(prevNode, dst, resultLabel);
+        }
+    };
+
+    // 主工作列表算法
     while (!workList.empty())
     {
-        CFLREdge edge = workList.pop();
-        unsigned u = edge.src;
-        unsigned v = edge.dst;
-        EdgeLabel label = edge.label;
+        CFLREdge currentEdge = workList.pop();
+        unsigned src = currentEdge.src;
+        unsigned dst = currentEdge.dst;
+        EdgeLabel edgeLabel = currentEdge.label;
 
-        // Helper function to add edge if not exists
-        auto addNewEdge = [this](unsigned src, unsigned dst, EdgeLabel lbl) {
-            if (!graph->hasEdge(src, dst, lbl))
-            {
-                graph->addEdge(src, dst, lbl);
-                workList.push(CFLREdge(src, dst, lbl));
-            }
-        };
+        auto &successorMap = graph->getSuccessorMap();
+        auto &predecessorMap = graph->getPredecessorMap();
 
-        // Get fresh references to maps in each iteration to avoid stale references
-        auto &succMap = graph->getSuccessorMap();
-        auto &predMap = graph->getPredecessorMap();
-
-        // Apply grammar rules based on the current edge label
-        switch (label)
+        // 根据边标签使用switch语句应用语法规则
+        switch (edgeLabel)
         {
-            // Rule: PT ∷= VF Addr
-            case VF:
-            {
-                // VF is reflexive (already initialized)
-                // Rule: PT ∷= VF Addr (if u --VF--> v and v --Addr--> w, then u --PT--> w)
-                if (succMap.find(v) != succMap.end() && succMap[v].find(Addr) != succMap[v].end())
-                {
-                    for (auto w : succMap[v][Addr])
-                    {
-                        addNewEdge(u, w, PT);
-                    }
-                }
-                // Rule: PT ∷= Addr VF (reverse: if prev --Addr--> u and u --VF--> v, then prev --PT--> v)
-                if (predMap.find(u) != predMap.end() && predMap[u].find(Addr) != predMap[u].end())
-                {
-                    for (auto prev : predMap[u][Addr])
-                    {
-                        addNewEdge(prev, v, PT);
-                    }
-                }
-                // Rule: VF ∷= VF VF (if u --VF--> v and v --VF--> w, then u --VF--> w)
-                if (succMap.find(v) != succMap.end() && succMap[v].find(VF) != succMap[v].end())
-                {
-                    for (auto w : succMap[v][VF])
-                    {
-                        addNewEdge(u, w, VF);
-                    }
-                }
-                // Rule: VA ∷= VF VA (if u --VF--> v and v --VA--> w, then u --VA--> w)
-                if (succMap.find(v) != succMap.end() && succMap[v].find(VA) != succMap[v].end())
-                {
-                    for (auto w : succMap[v][VA])
-                    {
-                        addNewEdge(u, w, VA);
-                    }
-                }
-                // Rule: VA ∷= VA VF (if prev --VA--> u and u --VF--> v, then prev --VA--> v)
-                if (predMap.find(u) != predMap.end() && predMap[u].find(VA) != predMap[u].end())
-                {
-                    for (auto prev : predMap[u][VA])
-                    {
-                        addNewEdge(prev, v, VA);
-                    }
-                }
+            case VFBar:
+                applyForwardRule(src, dst, VFBar, AddrBar, PT);
+                applyBackwardRule(src, dst, VFBar, VFBar, VFBar);
+                applyForwardRule(src, dst, VFBar, VA, VA);
                 break;
-            }
 
-            // Rule: PT ∷= Addr VF
+            case AddrBar:
+                applyBackwardRule(src, dst, AddrBar, VFBar, PT);
+                break;
+
             case Addr:
-            {
-                // Rule: PT ∷= Addr VF (if u --Addr--> v and v --VF--> w, then u --PT--> w)
-                if (succMap.find(v) != succMap.end() && succMap[v].find(VF) != succMap[v].end())
-                {
-                    for (auto w : succMap[v][VF])
-                    {
-                        addNewEdge(u, w, PT);
-                    }
-                }
-                // Rule: PT ∷= VF Addr (reverse: if prev --VF--> u and u --Addr--> v, then prev --PT--> v)
-                if (predMap.find(u) != predMap.end() && predMap[u].find(VF) != predMap[u].end())
-                {
-                    for (auto prev : predMap[u][VF])
-                    {
-                        addNewEdge(prev, v, PT);
-                    }
-                }
+                applyForwardRule(src, dst, Addr, VF, PTBar);
                 break;
-            }
 
-            // Rule: VF ∷= Copy
+            case VF:
+                applyForwardRule(src, dst, VF, VF, VF);
+                applyBackwardRule(src, dst, VF, VF, VF);
+                applyBackwardRule(src, dst, VF, Addr, PTBar);
+                applyBackwardRule(src, dst, VF, VA, VA);
+                break;
+
             case Copy:
-            {
-                // Copy directly becomes VF
-                addNewEdge(u, v, VF);
+                insertNewEdge(src, dst, VF);
                 break;
-            }
 
-            // Rule: SV ∷= Store VA, then VF ∷= SV Load
-            case Store:
-            {
-                // Rule: SV ∷= Store VA (if u --Store--> v and v --VA--> w, then u --SV--> w)
-                if (succMap.find(v) != succMap.end() && succMap[v].find(VA) != succMap[v].end())
-                {
-                    for (auto w : succMap[v][VA])
-                    {
-                        addNewEdge(u, w, SV);
-                    }
-                }
-                // Rule: SV ∷= VA Store (if prev --VA--> u and u --Store--> v, then prev --SV--> v)
-                if (predMap.find(u) != predMap.end() && predMap[u].find(VA) != predMap[u].end())
-                {
-                    for (auto prev : predMap[u][VA])
-                    {
-                        addNewEdge(prev, v, SV);
-                    }
-                }
-                // Rule: VF ∷= Store VP (if u --Store--> v and v --VP--> w, then u --VF--> w)
-                if (succMap.find(v) != succMap.end() && succMap[v].find(VP) != succMap[v].end())
-                {
-                    for (auto w : succMap[v][VP])
-                    {
-                        addNewEdge(u, w, VF);
-                    }
-                }
-                break;
-            }
-
-            // Rule: LV ∷= Load VA, then VA ∷= LV Load, and VF ∷= SV Load, VF ∷= PV Load
-            case Load:
-            {
-                // Rule: LV ∷= Load VA (if there's VA from v, create LV from u)
-                if (succMap.find(v) != succMap.end() && succMap[v].find(VA) != succMap[v].end())
-                {
-                    for (auto w : succMap[v][VA])
-                    {
-                        addNewEdge(u, w, LV);
-                    }
-                }
-                // Rule: VA ∷= LV Load (if there's LV to u, create VA from prev to v)
-                if (predMap.find(u) != predMap.end() && predMap[u].find(LV) != predMap[u].end())
-                {
-                    for (auto prev : predMap[u][LV])
-                    {
-                        addNewEdge(prev, v, VA);
-                    }
-                }
-                // Rule: VF ∷= SV Load (if there's SV to u, create VF from prev to v)
-                if (predMap.find(u) != predMap.end() && predMap[u].find(SV) != predMap[u].end())
-                {
-                    for (auto prev : predMap[u][SV])
-                    {
-                        addNewEdge(prev, v, VF);
-                    }
-                }
-                // Rule: VF ∷= PV Load (if there's PV to u, create VF from prev to v)
-                if (predMap.find(u) != predMap.end() && predMap[u].find(PV) != predMap[u].end())
-                {
-                    for (auto prev : predMap[u][PV])
-                    {
-                        addNewEdge(prev, v, VF);
-                    }
-                }
-                break;
-            }
-
-            // Rule: SV ∷= Store VA
             case SV:
-            {
-                // Rule: VF ∷= SV Load (if there's Load from v, create VF from u)
-                if (succMap.find(v) != succMap.end() && succMap[v].find(Load) != succMap[v].end())
-                {
-                    for (auto w : succMap[v][Load])
-                    {
-                        addNewEdge(u, w, VF);
-                    }
-                }
+                applyForwardRule(src, dst, SV, Load, VF);
                 break;
-            }
 
-            // Rule: PV ∷= PT VA
+            case Load:
+                applyBackwardRule(src, dst, Load, SV, VF);
+                applyBackwardRule(src, dst, Load, PV, VF);
+                applyBackwardRule(src, dst, Load, LV, VA);
+                break;
+
             case PV:
-            {
-                // Rule: VF ∷= PV Load (if there's Load from v, create VF from u)
-                if (succMap.find(v) != succMap.end() && succMap[v].find(Load) != succMap[v].end())
-                {
-                    for (auto w : succMap[v][Load])
-                    {
-                        addNewEdge(u, w, VF);
-                    }
-                }
+                applyForwardRule(src, dst, PV, Load, VF);
+                applyForwardRule(src, dst, PV, StoreBar, VFBar);
                 break;
-            }
 
-            // Rule: VP ∷= VA PT
+            case Store:
+                applyForwardRule(src, dst, Store, VP, VF);
+                applyForwardRule(src, dst, Store, VA, SV);
+                break;
+
             case VP:
-            {
-                // Rule: VF ∷= Store VP (if there's Store to u, create VF from prev to v)
-                if (predMap.find(u) != predMap.end() && predMap[u].find(Store) != predMap[u].end())
-                {
-                    for (auto prev : predMap[u][Store])
-                    {
-                        addNewEdge(prev, v, VF);
-                    }
-                }
+                applyBackwardRule(src, dst, VP, Store, VF);
+                applyBackwardRule(src, dst, VP, LoadBar, VFBar);
                 break;
-            }
 
-            // Rule: VA ∷= LV Load
+            case CopyBar:
+                insertNewEdge(src, dst, VFBar);
+                break;
+
+            case LoadBar:
+                applyForwardRule(src, dst, LoadBar, SVBar, VFBar);
+                applyForwardRule(src, dst, LoadBar, VP, VFBar);
+                applyForwardRule(src, dst, LoadBar, VA, LV);
+                break;
+
+            case SVBar:
+                applyBackwardRule(src, dst, SVBar, LoadBar, VFBar);
+                break;
+
+            case StoreBar:
+                applyBackwardRule(src, dst, StoreBar, VA, SVBar);
+                break;
+
             case LV:
-            {
-                // Rule: VA ∷= LV Load (if there's Load from v, create VA from u)
-                if (succMap.find(v) != succMap.end() && succMap[v].find(Load) != succMap[v].end())
-                {
-                    for (auto w : succMap[v][Load])
-                    {
-                        addNewEdge(u, w, VA);
-                    }
-                }
+                applyForwardRule(src, dst, LV, Load, VA);
                 break;
-            }
 
-            // Rule: VA ∷= ε (reflexive)
             case VA:
-            {
-                // VA is reflexive (already initialized)
-                // Rule: VA ∷= VF VA (already handled in VF case)
-                // Rule: VA ∷= VA VF (already handled in VF case)
-                // Rule: SV ∷= Store VA (already handled in Store case)
-                // Rule: SV ∷= VA Store (already handled in Store case)
-                // Rule: PV ∷= PT VA
-                if (predMap.find(u) != predMap.end() && predMap[u].find(PT) != predMap[u].end())
-                {
-                    for (auto prev : predMap[u][PT])
-                    {
-                        addNewEdge(prev, v, PV);
-                    }
-                }
-                // Rule: VP ∷= VA PT
-                if (succMap.find(v) != succMap.end() && succMap[v].find(PT) != succMap[v].end())
-                {
-                    for (auto w : succMap[v][PT])
-                    {
-                        addNewEdge(u, w, VP);
-                    }
-                }
-                // Rule: LV ∷= Load VA (already handled in Load case)
+                applyBackwardRule(src, dst, VA, VFBar, VA);
+                applyForwardRule(src, dst, VA, VF, VA);
+                applyBackwardRule(src, dst, VA, Store, SV);
+                applyForwardRule(src, dst, VA, StoreBar, SVBar);
+                applyBackwardRule(src, dst, VA, PTBar, PV);
+                applyForwardRule(src, dst, VA, PT, VP);
+                applyBackwardRule(src, dst, VA, LoadBar, LV);
                 break;
-            }
 
-            // Rule: PT ∷= VF Addr, PT ∷= Addr VF
-            case PT:
-            {
-                // Rule: PV ∷= PT VA (if there's VA from v, create PV from u)
-                if (succMap.find(v) != succMap.end() && succMap[v].find(VA) != succMap[v].end())
-                {
-                    for (auto w : succMap[v][VA])
-                    {
-                        addNewEdge(u, w, PV);
-                    }
-                }
-                // Rule: VP ∷= VA PT (if there's VA to u, create VP from prev to v)
-                if (predMap.find(u) != predMap.end() && predMap[u].find(VA) != predMap[u].end())
-                {
-                    for (auto prev : predMap[u][VA])
-                    {
-                        addNewEdge(prev, v, VP);
-                    }
-                }
+            case PTBar:
+                applyForwardRule(src, dst, PTBar, VA, PV);
                 break;
-            }
+
+            case PT:
+                applyBackwardRule(src, dst, PT, VA, VP);
+                break;
 
             default:
                 break;
