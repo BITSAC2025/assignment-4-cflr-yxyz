@@ -19,7 +19,8 @@ int main(int argc, char **argv)
 
     SVFIRBuilder builder;
     auto pag = builder.build();
-    pag->dump("pag.dot");
+    std::string pagDotFile = pag->getModuleIdentifier() + ".dot";
+    pag->dump(pagDotFile);
 
     CFLR solver;
     solver.buildGraph(pag);
@@ -34,6 +35,9 @@ int main(int argc, char **argv)
 
 void CFLR::solve()
 {
+    if (!graph)
+        return;
+    
     // Initialize VF and VA as reflexive (VF ∷= ε, VA ∷= ε)
     // Collect all nodes first
     std::set<unsigned> allNodes;
@@ -113,6 +117,8 @@ void CFLR::solve()
             }
         };
 
+        // Get fresh references to maps in each iteration to avoid stale references
+        auto &succMap = graph->getSuccessorMap();
         auto &predMap = graph->getPredecessorMap();
 
         // Apply grammar rules based on the current edge label
